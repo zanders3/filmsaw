@@ -7,6 +7,8 @@ A barebones movie editor inspired by Windows Movie Maker. Made during the Handma
 
 Written in C using the Sokol Libs for graphics, window setup and input and FFmpeg to actually open and render the movie files to the screen.
 
+![Screenshot](screenshot.png)
+
 Building
 --------
 
