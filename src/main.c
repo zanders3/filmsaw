@@ -110,6 +110,7 @@ typedef struct {
   bool is_dir;
   sg_image thumbnail;
   char filename[PATH_MAX];
+  double video_total_secs;
 } VideoSource;
 
 typedef struct {
@@ -143,6 +144,7 @@ void videosources_opendir(VideoSources* s, const char* path) {
       continue; // only look at files and directories
     }
     sg_image thumbnail = (sg_image){0};
+    double vid_total_secs = 0.0;
     if (ent->d_type == DT_REG) {
       char* dot = strrchr(ent->d_name, '.');
       if (dot == NULL) {
@@ -166,6 +168,7 @@ void videosources_opendir(VideoSources* s, const char* path) {
         continue;
       }
       thumbnail = video_make_thumbnail(res.vid, 0.0, 100, 100);
+      vid_total_secs = video_total_secs(res.vid);
       video_close(res.vid);
     } else {
       if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) {
@@ -179,7 +182,8 @@ void videosources_opendir(VideoSources* s, const char* path) {
       s->sources = (VideoSource*)newbuf;
     }
     VideoSource* source = &s->sources[s->num++];
-    *source = (VideoSource){.is_dir = ent->d_type == DT_DIR, .thumbnail = thumbnail};
+    *source =
+        (VideoSource){.is_dir = ent->d_type == DT_DIR, .thumbnail = thumbnail, .video_total_secs = vid_total_secs};
     snprintf(source->filename, PATH_MAX, "%s", ent->d_name);
   }
   snprintf(s->filepath, PATH_MAX, "%s", path);
@@ -195,15 +199,15 @@ typedef struct MovieMaker {
   UndoBuffer undo;
 
   VideoClips clips;
-  double trackoffset, tracklen;
+  double trackpos, tracklen;
+  bool didseektrack;
 
   int selclipidx;
   float selclipdragstart;
   double selclipdragstartoffset;
   bool selclipdragstarted;
 
-  VideoId video;
-  float trackzoom, trackzoomspeed, trackdragstart;
+  float trackoffset, trackzoom, trackzoomspeed, trackdragstart;
   double trackdragstartoffset;
   bool trackdragstarted;
 
@@ -260,16 +264,9 @@ static void app_init(void) {
     }
   }
 
-  VideoOpenRes res = video_open("GNNX8406.MP4");
-  assert(res.err == NULL);
-
-  sg_image thumbnail = video_make_thumbnail(res.vid, 0.0, 80, 80);
-  double vid_total_secs = video_total_secs(res.vid);
-  videoclips_push(&m->clips, (VideoClip){.clipend = vid_total_secs, .vid = res.vid, .thumbnail = thumbnail});
-  m->trackzoom = 800.0f / ((float)vid_total_secs * 2.0f);
-  m->trackoffset = vid_total_secs * 0.5f;
-  m->tracklen = vid_total_secs * 2.0f;
-  m->video = res.vid;
+  m->trackzoom = 800.0f / 32.0f;
+  m->trackoffset = 16.0f * 0.5f;
+  m->tracklen = 16.0f * 2.0f;
   m->selclipidx = -1;
   m->undo.tail = -1;
   m->undo.pos = -1;
@@ -286,12 +283,13 @@ static void app_sliceclip(void) {
     return;
   }
   VideoClip* clip = &m->clips.clips[m->selclipidx];
-  double pos_secs = video_pos_secs(m->video);
+  double pos_secs = m->trackpos;
   if (clip->pos > pos_secs || pos_secs > (clip->pos + clip->clipend - clip->clipstart)) {
     return;
   }
   sg_image thumbnail = video_make_thumbnail(clip->vid, (pos_secs - clip->pos) + clip->clipstart, 100, 100);
   videoclips_push(&m->clips, (VideoClip){.pos = pos_secs,
+                                         .track = clip->track,
                                          .clipstart = (pos_secs - clip->pos) + clip->clipstart,
                                          .clipend = clip->clipend,
                                          .vid = clip->vid,
@@ -359,12 +357,23 @@ BoxStyle track_style_sel = {.bg_color = {77, 100, 144, 255}, .border_radius = 1.
 Color trackmarker_col = {66, 109, 174, 255};
 
 static void app_trackspanel(MovieMaker* m, Rect trackspanel) {
+
   ui_draw_box(m->ui, trackspanel, &(BoxStyle){.bg_color = track_bg});
   Rect timebar = rect_cut_top(&trackspanel, 24.0f);
+
+  // figure out the total movie length
+  m->tracklen = 0.0;
+  for (int i = 0; i < m->clips.num; i++) {
+    VideoClip* clip = &m->clips.clips[i];
+    double clipend = clip->pos + (clip->clipend - clip->clipstart);
+    if (clipend > m->tracklen) {
+      m->tracklen = clipend;
+    }
+  }
   if (ui_get_event(m->ui, timebar) & UIEvent_MouseDown) {
     m->selclipidx = -1;
-    double t = ui_clampd((ui_mouse(m->ui, timebar).x / m->trackzoom) - m->trackoffset, 0.0, video_total_secs(m->video));
-    video_seek(m->video, t);
+    m->trackpos = ui_clampd((ui_mouse(m->ui, timebar).x / m->trackzoom) - m->trackoffset, 0.0, m->tracklen);
+    m->didseektrack = true;
     m->paused = true;
   }
 
@@ -373,6 +382,7 @@ static void app_trackspanel(MovieMaker* m, Rect trackspanel) {
   int unitidx = 0;
   static float units[] = {1.0f, 2.0f, 5.0f, 10.0f, 30.0f, 60.0f, 300.0f};
 
+  // draw the units and the tick bars
   bool wantframes = false;
   float unitwidth = (float)m->trackzoom;
   if (unitwidth > 1300.0f) {
@@ -405,30 +415,16 @@ static void app_trackspanel(MovieMaker* m, Rect trackspanel) {
                 &(BoxStyle){.bg_color = panel_col});
   }
 
-  // apply track zoom, track middle mouse drag, selection clearing, time drag
-  UIEvent evt = ui_get_event(m->ui, trackspanel);
-  if (evt & UIEvent_MouseHover) { // track zoom
-    float midx = trackspanel.minx + rect_width(trackspanel) * 0.5f;
-    float midt = (midx / m->trackzoom);
-    m->trackzoom = ui_clamp(m->trackzoom + ui_mousescroll(m->ui).dy * 0.002f * m->trackzoom, 1.0f, 2000.0f);
-    float newmidt = (midx / m->trackzoom);
-    m->trackoffset += (newmidt - midt);
-  }
-  if (evt & UIEvent_MouseDown) { // clear selection and time drag
+  // highlight the track area in use
+  ui_draw_box(m->ui,
+              (Rect){(float)(m->trackoffset * m->trackzoom), trackspanel.miny,
+                     (float)((m->tracklen + m->trackoffset) * m->trackzoom), trackspanel.maxy},
+              &(BoxStyle){255, 255, 255, 20});
+
+  // grab track event for underneath the tracks
+  UIEvent trackevt = ui_get_event(m->ui, trackspanel);
+  if (trackevt & UIEvent_MouseDown) { // clear selection and time drag
     m->selclipidx = -1;
-  }
-  if (evt & UIEvent_MouseMidDown) { // track movement
-    Mouse mouse = ui_mouse(m->ui, timebar);
-    if (evt & UIEvent_MouseMidDrag) {
-      if (!m->trackdragstarted) {
-        m->trackdragstarted = true;
-        m->trackdragstart = mouse.x;
-        m->trackdragstartoffset = m->trackoffset;
-      }
-      m->trackoffset = (mouse.x - m->trackdragstart) / m->trackzoom + m->trackdragstartoffset;
-    }
-  } else {
-    m->trackdragstarted = false;
   }
 
   // draw each track
@@ -439,6 +435,7 @@ static void app_trackspanel(MovieMaker* m, Rect trackspanel) {
     Rect track = (Rect){x0, trackspanel.miny + 5.0f + (100.0f * clip->track), x1,
                         trackspanel.miny + 90.0f + (100.0f * clip->track)};
     UIEvent clipevt = ui_get_event(m->ui, track);
+    trackevt |= clipevt & (UIEvent_MouseDrag | UIEvent_MouseMidDrag | UIEvent_MouseMidDown | UIEvent_MouseHover);
     if (clipevt & UIEvent_MouseDown) {
       if (clipevt & UIEvent_MouseDrag && m->selclipidx == i) {
         Mouse mouse = ui_mouse(m->ui, timebar);
@@ -462,11 +459,11 @@ static void app_trackspanel(MovieMaker* m, Rect trackspanel) {
             continue;
           }
           double oposend = o->pos + (o->clipend - o->clipstart);
-          if (o->pos < clip->pos && clip->pos < oposend) {
+          if (o->pos <= clip->pos && clip->pos <= oposend) {
             clip->pos = oposend;
             break;
           }
-          if (o->pos < clipposend && clipposend < oposend) {
+          if (o->pos <= clipposend && clipposend <= oposend) {
             clip->pos = o->pos - (clip->clipend - clip->clipstart);
             break;
           }
@@ -510,9 +507,109 @@ static void app_trackspanel(MovieMaker* m, Rect trackspanel) {
     }
   }
 
+  // apply track zoom, track middle mouse drag, selection clearing, time drag
+  if (trackevt & UIEvent_MouseHover) { // track zoom
+    float midx = trackspanel.minx + rect_width(trackspanel) * 0.5f;
+    float midt = (midx / m->trackzoom);
+    m->trackzoom = ui_clamp(m->trackzoom + ui_mousescroll(m->ui).dy * 0.002f * m->trackzoom, 1.0f, 2000.0f);
+    float newmidt = (midx / m->trackzoom);
+    m->trackoffset += (newmidt - midt);
+  }
+  if (trackevt & UIEvent_MouseMidDown) { // track movement
+    Mouse mouse = ui_mouse(m->ui, timebar);
+    if (trackevt & UIEvent_MouseMidDrag) {
+      if (!m->trackdragstarted) {
+        m->trackdragstarted = true;
+        m->trackdragstart = mouse.x;
+        m->trackdragstartoffset = m->trackoffset;
+      }
+      m->trackoffset = (float)(((mouse.x - m->trackdragstart) / m->trackzoom) + m->trackdragstartoffset);
+    }
+  } else {
+    m->trackdragstarted = false;
+  }
+
+  // draw clip being placed
+  if (m->dragvideo || m->placevideo) {
+    const VideoSource* source = m->dragvideo ? m->dragvideo : m->placevideo;
+    double pos = ((m->dragvideopos.minx - trackspanel.minx) / m->trackzoom) - m->trackoffset;
+    if (pos < 0.0) {
+      pos = 0.0;
+    }
+    double posend = pos + source->video_total_secs;
+    float posy = m->dragvideopos.miny - trackspanel.miny;
+    if (posy > 0.0f) {
+      int trackidx = posy > 95.0f + rect_height(timebar);
+      // prevent overlaps with a single clip
+      for (int j = 0; j < m->clips.num; j++) {
+        VideoClip* o = &m->clips.clips[j];
+        if (o->track != trackidx) {
+          continue;
+        }
+        double oposend = o->pos + (o->clipend - o->clipstart);
+        if (o->pos < pos && pos < oposend) {
+          pos = oposend;
+          break;
+        }
+        if (o->pos < posend && posend < oposend) {
+          pos = o->pos - source->video_total_secs;
+          break;
+        }
+      }
+      // make sure clip doesn't collide with an existing clip
+      bool clip_overlaps = false;
+      for (int i = 0; i < m->clips.num; i++) {
+        VideoClip* o = &m->clips.clips[i];
+        if (o->track != trackidx) {
+          continue;
+        }
+        double oposend = o->pos + (o->clipend - o->clipstart);
+        if ((o->pos <= pos && pos <= oposend) || (o->pos <= posend && posend <= oposend) ||
+            (pos <= o->pos && posend >= o->pos)) {
+          clip_overlaps = true;
+          break;
+        }
+      }
+      // draw the clip if it doesn't overlap
+      if (!clip_overlaps) {
+        float x0 = (float)((pos + m->trackoffset) * m->trackzoom);
+        float x1 = (float)((pos + source->video_total_secs + m->trackoffset) * m->trackzoom);
+        Rect track = (Rect){x0, trackspanel.miny + 5.0f + (100.0f * trackidx), x1,
+                            trackspanel.miny + 90.0f + (100.0f * trackidx)};
+        ui_draw_box(m->ui, rect_translate(rect_expand(track, 3.0f), 1.0f, 1.0f), &track_style_shadow);
+        ui_draw_box(m->ui, track, &track_style_sel);
+        track = rect_contract(track, 5.0f);
+        Rect clipname = rect_cut_top(&track, 15.0f);
+        if (rect_width(clipname) > 2.0f) {
+          ui_scissor(m->ui, &clipname);
+          ui_draw_text(m->ui, clipname, source->filename, NULL, &(DrawTextOptions){.font_size = 14.0f});
+          ui_scissor(m->ui, NULL);
+          ui_draw_image(m->ui, rect_inset_left(track, 80.0f), source->thumbnail, (Rect){0.0f, 0.0f, 1.0f, 1.0f});
+        }
+        // dragging has stopped and we're in a valid position: actually place the video!
+        if (m->placevideo) {
+          char fullpath[PATH_MAX];
+          snprintf(fullpath, PATH_MAX, "%s/%s", m->sources.filepath, m->placevideo->filename);
+          VideoOpenRes res = video_open(fullpath);
+          if (res.err) {
+            DebugLog("failed to open video %s: %s\n", fullpath, res.err);
+          } else {
+            sg_image thumbnail = video_make_thumbnail(res.vid, 0.0, 100, 100);
+            videoclips_push(&m->clips, (VideoClip){.vid = res.vid,
+                                                   .pos = pos,
+                                                   .clipend = source->video_total_secs,
+                                                   .thumbnail = thumbnail,
+                                                   .track = trackidx});
+            undobuffer_push(&m->undo, &m->clips);
+          }
+        }
+      }
+    }
+  }
+
   // draw the position marker
   {
-    double t = video_pos_secs(m->video);
+    double t = m->trackpos;
     float pos = (float)((t + m->trackoffset) * m->trackzoom);
 
     Rect marker = (Rect){pos - 1.0f, trackspanel.miny, pos + 1.0f, trackspanel.maxy};
@@ -525,6 +622,34 @@ static void app_trackspanel(MovieMaker* m, Rect trackspanel) {
     snprintf(buf, 256, "%.02f", t);
     ui_draw_text(m->ui, rect_translate(posmarker, 8.0f, 5.0f), buf, NULL, &(DrawTextOptions){.font_size = 14.0f});
   }
+}
+
+static void app_drawvideo(MovieMaker* m, VideoId vid, Rect videopanel) {
+  float vw = (float)video_width(vid), vh = (float)video_height(vid);
+  float rw = rect_width(videopanel), rh = rect_height(videopanel);
+  float w, h;
+  if (vh > vw) {
+    float aspect = vw / vh;
+    w = aspect * rh;
+    h = rh;
+  } else {
+    float aspect = vh / vw;
+    w = rw;
+    h = aspect * rw;
+  }
+  if (h > rh) {
+    float scale = rh / h;
+    w *= scale;
+    h *= scale;
+  }
+  if (w > rw) {
+    float scale = rw / w;
+    w *= scale;
+    h *= scale;
+  }
+  Rect video = rect_centre(videopanel, w, h);
+  ui_draw_box(m->ui, video, &button);
+  ui_draw_image(m->ui, video, video_image(vid), (Rect){.maxx = 1.0f, .maxy = 1.0f});
 }
 
 static void app_videopanel(MovieMaker* m, Rect videopanel) {
@@ -545,7 +670,8 @@ static void app_videopanel(MovieMaker* m, Rect videopanel) {
     case 0:
       r = m->iconrectshflipped[IconType_End];
       if (evt & UIEvent_MouseClick) {
-        video_seek(m->video, 0.0f);
+        m->trackpos = 0.0;
+        m->didseektrack = true;
       }
       break;
     case 1:
@@ -557,7 +683,8 @@ static void app_videopanel(MovieMaker* m, Rect videopanel) {
     case 2:
       r = m->iconrects[IconType_End];
       if (evt & UIEvent_MouseClick) {
-        video_seek(m->video, video_total_secs(m->video));
+        m->trackpos = m->tracklen;
+        m->didseektrack = true;
       }
       break;
     }
@@ -565,13 +692,11 @@ static void app_videopanel(MovieMaker* m, Rect videopanel) {
     rect_cut_left(&buttons, 5.0f);
   }
   rect_cut_left(&buttons, 5.0f);
-  double vid_total_secs = video_total_secs(m->video);
-  double vid_pos_secs = video_pos_secs(m->video);
   // draw time label
   {
     Rect timedisplay = buttons;
     char buf[256];
-    snprintf(buf, 256, "%00.3f/%00.3f", vid_pos_secs, vid_total_secs);
+    snprintf(buf, 256, "%00.3f/%00.3f", m->trackpos, m->tracklen);
     timedisplay.miny += 8.0f;
     ui_draw_text(m->ui, timedisplay, buf, NULL,
                  &(DrawTextOptions){.align = TextAlign_Middle | TextAlign_Left, .font_size = 14.0f});
@@ -584,13 +709,15 @@ static void app_videopanel(MovieMaker* m, Rect videopanel) {
     UIEvent evt = ui_get_event(m->ui, playbar);
     if (evt & UIEvent_MouseDown) {
       float dx = ui_clamp(ui_mouse(m->ui, playbar).x / rect_width(playbar), 0.0f, 1.0f);
-      video_seek(m->video, dx * vid_total_secs);
+      m->trackpos = dx * m->tracklen;
+      m->didseektrack = true;
       m->paused = true;
     }
     playbar = rect_contract(playbar, 2.0f);
     ui_draw_box(m->ui, playbar, &(BoxStyle){.bg_color = button_col});
     if (video_total_secs) {
-      Rect progress = rect_cut_left(&playbar, rect_width(playbar) * (float)(vid_pos_secs / vid_total_secs));
+      Rect progress =
+          rect_cut_left(&playbar, rect_width(playbar) * (float)(m->trackpos / (m->tracklen ? m->tracklen : 1.0)));
       ui_draw_box(m->ui, progress, &(BoxStyle){.bg_color = blue_col});
       Rect marker = rect_cut_right(&progress, 2.0f);
       marker.miny -= 4.0f;
@@ -605,31 +732,37 @@ static void app_videopanel(MovieMaker* m, Rect videopanel) {
   // draw video
   {
     ui_draw_box(m->ui, videopanel, &(BoxStyle){.bg_color = {0, 0, 0, 255}});
-    float vw = (float)video_width(m->video), vh = (float)video_height(m->video);
-    float rw = rect_width(videopanel), rh = rect_height(videopanel);
-    float w, h;
-    if (vh > vw) {
-      float aspect = vw / vh;
-      w = aspect * rh;
-      h = rh;
-    } else {
-      float aspect = vh / vw;
-      w = rw;
-      h = aspect * rw;
+    double dt = sapp_frame_duration();
+    if (!m->paused) {
+      m->trackpos = ui_clampd(m->trackpos + dt, 0.0, m->tracklen);
     }
-    if (h > rh) {
-      float scale = rh / h;
-      w *= scale;
-      h *= scale;
+
+    // find the current top and bottom clip
+    const VideoClip* top = NULL;
+    const VideoClip* bottom = NULL;
+    for (int i = 0; i < m->clips.num; i++) {
+      const VideoClip* clip = &m->clips.clips[i];
+      if (m->trackpos >= clip->pos && m->trackpos <= clip->pos + (clip->clipend - clip->clipstart)) {
+        if (clip->track == 0 && top == NULL) {
+          top = clip;
+        }
+        if (clip->track == 1 && bottom == NULL) {
+          bottom = clip;
+        }
+        if (top && bottom) {
+          break;
+        }
+      }
     }
-    if (w > rw) {
-      float scale = rw / w;
-      w *= scale;
-      h *= scale;
+    if (top) {
+      double clippos = ui_clampd(m->trackpos - top->pos + top->clipstart, 0.0, video_total_secs(top->vid));
+      video_nextframe(top->vid, clippos);
+      app_drawvideo(m, top->vid, videopanel);
+    } else if (bottom) {
+      double clippos = ui_clampd(m->trackpos - bottom->pos + bottom->clipstart, 0.0, video_total_secs(bottom->vid));
+      video_nextframe(bottom->vid, clippos);
+      app_drawvideo(m, bottom->vid, videopanel);
     }
-    Rect video = rect_centre(videopanel, w, h);
-    ui_draw_box(m->ui, video, &button);
-    ui_draw_image(m->ui, video, video_image(m->video), (Rect){.maxx = 1.0f, .maxy = 1.0f});
   }
 }
 
@@ -761,8 +894,6 @@ static void app_sourcepanel(MovieMaker* m, Rect sourcepanel) {
 
 static void app_frame(void) {
   MovieMaker* m = &state;
-  double dt = sapp_frame_duration();
-  video_nextframe(m->video, m->paused ? 0.0 : dt);
 
   ui_frame(m->ui);
   sgl_defaults();
@@ -804,7 +935,6 @@ static void app_frame(void) {
 }
 
 static void app_cleanup(void) {
-  video_close(state.video);
 }
 
 sapp_desc sokol_main(int argc, char* argv[]) {

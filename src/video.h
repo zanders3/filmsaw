@@ -14,8 +14,7 @@ typedef struct {
   const char* err;
 } VideoOpenRes;
 VideoOpenRes video_open(const char* path);
-void video_seek(VideoId vid, double pos_secs);
-void video_nextframe(VideoId vid, double dt);
+void video_nextframe(VideoId vid, double pos_secs);
 void video_close(VideoId vid);
 double video_total_secs(VideoId vid);
 double video_pos_secs(VideoId vid);

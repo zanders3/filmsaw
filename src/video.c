@@ -28,7 +28,6 @@ typedef struct {
   char filename[_MAX_PATH + 1];
 
   double pos_secs, next_swap_secs, total_secs;
-  bool want_seek;
 } Video;
 
 typedef struct {
@@ -108,7 +107,8 @@ static void _video_free(VideoId id) {
 VideoOpenRes video_open(const char* path) {
   VideoId vid = _video_alloc();
   Video* v = _video_at(vid);
-  snprintf(v->filename, sizeof(v->filename), "%.*s", (int)strlen(path), path);
+  char* lastslash = strrchr(path, '/');
+  snprintf(v->filename, sizeof(v->filename), "%.*s", (int)strlen(path), lastslash ? lastslash + 1 : path);
 
   const char* err = NULL;
   int res = avformat_open_input(&v->fmt_ctx, path, NULL, NULL);
@@ -178,21 +178,16 @@ cleanup:
   return (VideoOpenRes){.vid = vid};
 }
 
-void video_seek(VideoId vid, double pos_secs) {
+void video_nextframe(VideoId vid, double pos_secs) {
   Video* v = _video_at(vid);
-  v->want_seek = true;
-  if (pos_secs > v->total_secs) {
-    pos_secs = v->total_secs;
-  }
-  if (pos_secs < 0.0) {
-    pos_secs = 0.0;
-  }
+  double dt = pos_secs - v->pos_secs;
   v->pos_secs = pos_secs;
-}
-
-void video_nextframe(VideoId vid, double dt) {
-  Video* v = _video_at(vid);
-  if (v->want_seek) {
+  if (v->pos_secs < 0.0) {
+    v->pos_secs = 0.0;
+  } else if (v->pos_secs > v->total_secs) {
+    v->pos_secs = v->total_secs;
+  }
+  if (dt < 0.0 || dt > 0.01) {
     int64_t timestamp =
         (int64_t)((double)v->pos_secs * av_q2d(av_inv_q(v->fmt_ctx->streams[v->vidstreamidx]->time_base)));
     av_seek_frame(v->fmt_ctx, v->vidstreamidx, timestamp, AVSEEK_FLAG_BACKWARD);
@@ -219,12 +214,7 @@ void video_nextframe(VideoId vid, double dt) {
       av_packet_unref(&packet);
     }
     av_packet_unref(&packet);
-    v->want_seek = false;
     return;
-  }
-  v->pos_secs += dt;
-  if (v->pos_secs > v->total_secs) {
-    v->pos_secs = v->total_secs;
   }
   if (v->next_swap_secs > v->pos_secs) {
     return;
