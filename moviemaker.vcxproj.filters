@@ -1,0 +1,69 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <None Include=".clang-format" />
+    <None Include="src\sprites.inl" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\main.c" />
+    <ClCompile Include="src\3rdparty\sokol\sokol.c">
+      <Filter>3rdparty\sokol</Filter>
+    </ClCompile>
+    <ClCompile Include="src\3rdparty\stb\stb_image.c">
+      <Filter>3rdparty\stb</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui.c" />
+    <ClCompile Include="data\fonts\vera.c">
+      <Filter>data</Filter>
+    </ClCompile>
+    <ClCompile Include="data\icons.c">
+      <Filter>data</Filter>
+    </ClCompile>
+    <ClCompile Include="src\video.c" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="3rdparty">
+      <UniqueIdentifier>{c0c6e90a-55ca-4bcd-8c0e-332a0a0032ca}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="3rdparty\sokol">
+      <UniqueIdentifier>{b9d281ca-616d-4129-9246-0548d209275d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="3rdparty\stb">
+      <UniqueIdentifier>{7baf3251-5286-41ef-b413-6e87f53a47e9}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="3rdparty\fontstash">
+      <UniqueIdentifier>{e2a3016c-cd7a-4d89-ae71-764816dd6860}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="data">
+      <UniqueIdentifier>{17953300-7818-471a-a1fc-c7c11c1dd5bb}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\3rdparty\stb\stb_image.h">
+      <Filter>3rdparty\stb</Filter>
+    </ClInclude>
+    <ClInclude Include="src\debuglog.h" />
+    <ClInclude Include="src\gb_math.h" />
+    <ClInclude Include="src\ui.h" />
+    <ClInclude Include="src\3rdparty\fontstash\fontstash.h">
+      <Filter>3rdparty\fontstash</Filter>
+    </ClInclude>
+    <ClInclude Include="src\video.h" />
+    <ClInclude Include="src\3rdparty\dirent.h">
+      <Filter>3rdparty</Filter>
+    </ClInclude>
+    <ClInclude Include="src\3rdparty\sokol\sokol_app.h">
+      <Filter>3rdparty\sokol</Filter>
+    </ClInclude>
+    <ClInclude Include="src\3rdparty\sokol\sokol_gfx.h">
+      <Filter>3rdparty\sokol</Filter>
+    </ClInclude>
+    <ClInclude Include="resource.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="Resource.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="data\logo.ico" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,19 @@
+---
+BasedOnStyle: Microsoft
+BraceWrapping:
+  AfterClass: false
+  AfterControlStatement: Never
+  AfterEnum: false
+  AfterFunction: false
+  AfterNamespace: false
+  AfterStruct: false
+  AfterExternBlock: false
+  BeforeCatch: false
+  BeforeElse: false
+  SplitEmptyRecord: false
+  SplitEmptyNamespace: false
+IndentWidth: 2
+TabWidth: 0
+SortIncludes: Never
+PointerAlignment: Left
+BreakBeforeBraces: Attach
