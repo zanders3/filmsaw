@@ -13,19 +13,7 @@
 #include <math.h>
 #include <memory.h>
 #include <dirent.h>
-
-typedef struct {
-  double pos, clipstart, clipend;
-  int track;
-  sg_image thumbnail;
-  VideoId vid;
-} VideoClip;
-
-// stuff to implement:
-// - cache first video keyframe, add ability to request specific images at specific timestep
-// - draw video track introduce video clips which use start + end offsets
-// - support for multiple videos on video track - hack two videos in to start with?
-// - open folder + display list of videos. can drag video onto track.
+#include "video_clips.h"
 
 enum IconType {
   IconType_Pause = 0,
@@ -37,27 +25,18 @@ enum IconType {
   IconType_Count = 6,
 };
 
-typedef struct {
-  VideoClip* clips;
-  int num, cap;
-} VideoClips;
-
-void videoclips_push(VideoClips* l, VideoClip c) {
-  if (l->num + 1 >= l->cap) {
-    l->cap = l->cap ? l->cap * 2 : 16;
-    void* newblock = realloc(l->clips, l->cap * sizeof(VideoClip));
-    assert(newblock);
-    l->clips = (VideoClip*)newblock;
-  }
-  l->clips[l->num++] = c;
-}
-
 #define MAX_UNDO_BUFFER (32)
 typedef struct {
   VideoClips states[MAX_UNDO_BUFFER];
   int head, tail, pos;
 } UndoBuffer;
 
+void undobuffer_clear(UndoBuffer* buffer) {
+  for (int i = 0; i < MAX_UNDO_BUFFER; i++) {
+    videoclips_free(&buffer->states[i]);
+  }
+  *buffer = (UndoBuffer){0};
+}
 void undobuffer_push(UndoBuffer* buffer, const VideoClips* clips) {
   if (buffer->pos != buffer->tail) {
     buffer->tail = buffer->pos;
@@ -268,9 +247,7 @@ static void app_init(void) {
   m->trackoffset = 16.0f * 0.5f;
   m->tracklen = 16.0f * 2.0f;
   m->selclipidx = -1;
-  m->undo.tail = -1;
-  m->undo.pos = -1;
-  undobuffer_push(&m->undo, &m->clips);
+  undobuffer_clear(&m->undo);
 
   char cwd[PATH_MAX];
   GetCurrentDirectoryA(PATH_MAX, cwd);
@@ -335,6 +312,20 @@ static void app_event(const sapp_event* ev) {
         undobuffer_redo(&m->undo, &m->clips);
       }
       break;
+    case SAPP_KEYCODE_O:
+      if (ev->modifiers & SAPP_MODIFIER_CTRL) {
+        undobuffer_clear(&m->undo);
+        videoclips_free(&m->clips);
+        m->trackpos = 0.0;
+        m->trackzoom = 800.0f / 32.0f;
+        m->trackoffset = 16.0f * 0.5f;
+        videoclips_load("project.json", &m->clips);
+      }
+      break;
+    case SAPP_KEYCODE_S:
+      if (ev->modifiers & SAPP_MODIFIER_CTRL) {
+        videoclips_save("project.json", &m->clips);
+      }
     }
     break;
   }

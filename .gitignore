@@ -1,3 +1,12 @@
 ﻿.vs
 x64
 vids
+CMakeFiles
+Debug
+filmsaw.dir
+CMakeCache.txt
+cmake_install.cmake
+*.vcxproj
+*.filters
+*.user
+*.sln

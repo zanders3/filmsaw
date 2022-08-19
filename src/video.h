@@ -22,6 +22,7 @@ int video_width(VideoId vid);
 int video_height(VideoId vid);
 struct sg_image video_image(VideoId vid);
 const char* video_filename(VideoId vid);
+const char* video_filepath(VideoId vid);
 
 // makes a new image thumbnail. the caller takes ownership of the sg_image if successful.
 struct sg_image video_make_thumbnail(VideoId vid, double pos_secs, int width, int height);

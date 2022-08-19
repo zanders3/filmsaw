@@ -6,12 +6,6 @@
 #include <sokol/sokol_gfx.h>
 #include <assert.h>
 
-#pragma comment(lib, "src/3rdparty/ffmpeg/lib/avcodec.lib")
-#pragma comment(lib, "src/3rdparty/ffmpeg/lib/avformat.lib")
-#pragma comment(lib, "src/3rdparty/ffmpeg/lib/swscale.lib")
-#pragma comment(lib, "src/3rdparty/ffmpeg/lib/swresample.lib")
-#pragma comment(lib, "src/3rdparty/ffmpeg/lib/avutil.lib")
-
 typedef struct {
   uint32_t id;
 
@@ -25,7 +19,7 @@ typedef struct {
   int imgbuflen;
   int vidstreamidx;
 
-  char filename[_MAX_PATH + 1];
+  char filepath[_MAX_PATH + 1];
 
   double pos_secs, next_swap_secs, total_secs;
 } Video;
@@ -78,16 +72,30 @@ static VideoId _video_alloc() {
   *v = (Video){.id = (ctr << _VIDEO_SLOT_SHIFT) | (slot_index & _VIDEO_SLOT_MASK)};
   return (VideoId){.id = v->id};
 }
-static Video* _video_at(VideoId id) {
+static Video* _video_lookup(VideoId id) {
   VideoPool* pool = &_videos;
-  assert(_VIDEO_INVALIDID != id.id);
+  if (_VIDEO_INVALIDID == id.id) {
+    return NULL;
+  }
   int slot_index = (int)(id.id & _VIDEO_SLOT_MASK);
-  assert(_VIDEO_INVALID_SLOT_INDEX != slot_index);
-  assert((slot_index > _VIDEO_INVALID_SLOT_INDEX) && (slot_index < VIDEO_POOL_SIZE));
+  if (_VIDEO_INVALID_SLOT_INDEX == slot_index) {
+    return NULL;
+  }
+  if ((slot_index <= _VIDEO_INVALID_SLOT_INDEX) || (slot_index >= VIDEO_POOL_SIZE)) {
+    return NULL;
+  }
   Video* v = &pool->videos[slot_index];
-  assert(v->id == id.id);
+  if (v->id != id.id) {
+    return NULL;
+  }
   return v;
 }
+static Video* _video_at(VideoId id) {
+  Video* v = _video_lookup(id);
+  assert(v);
+  return v;
+}
+
 static void _video_free(VideoId id) {
   VideoPool* pool = &_videos;
   Video* v = _video_at(id);
@@ -107,8 +115,7 @@ static void _video_free(VideoId id) {
 VideoOpenRes video_open(const char* path) {
   VideoId vid = _video_alloc();
   Video* v = _video_at(vid);
-  char* lastslash = strrchr(path, '/');
-  snprintf(v->filename, sizeof(v->filename), "%.*s", (int)strlen(path), lastslash ? lastslash + 1 : path);
+  snprintf(v->filepath, sizeof(v->filepath), "%.*s", (int)strlen(path), path);
 
   const char* err = NULL;
   int res = avformat_open_input(&v->fmt_ctx, path, NULL, NULL);
@@ -239,7 +246,10 @@ void video_nextframe(VideoId vid, double pos_secs) {
 }
 
 void video_close(VideoId vid) {
-  Video* v = _video_at(vid);
+  Video* v = _video_lookup(vid);
+  if (v == NULL) {
+    return;
+  }
   if (v->frame_raw) {
     av_frame_free(&v->frame_raw);
   }
@@ -275,7 +285,12 @@ sg_image video_image(VideoId vid) {
   return _video_at(vid)->img;
 }
 const char* video_filename(VideoId vid) {
-  return _video_at(vid)->filename;
+  const char* path = _video_at(vid)->filepath;
+  char* lastslash = strrchr(path, '/');
+  return lastslash ? lastslash + 1 : path;
+}
+const char* video_filepath(VideoId vid) {
+  return _video_at(vid)->filepath;
 }
 
 struct sg_image video_make_thumbnail(VideoId vid, double pos_secs, int width, int height) {
