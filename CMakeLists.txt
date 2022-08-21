@@ -14,6 +14,7 @@ set(source_list
 	src/3rdparty/stb/stb_image.h src/3rdparty/stb/stb_image.c
 	src/3rdparty/fontstash/fontstash.h src/3rdparty/fontstash/stb_truetype.h
 	src/3rdparty/thread/thread.h src/3rdparty/thread/thread.c
+	src/3rdparty/portable_file_dialogs.h src/3rdparty/portable_file_dialogs.cpp
 	data/fonts/vera.c data/icons.c Resource.rc
 )
 

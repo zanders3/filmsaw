@@ -15,6 +15,7 @@
 #include <dirent.h>
 #include <sokol/sokol_audio.h>
 #include "video_clips.h"
+#include <portable_file_dialogs.h>
 
 enum IconType {
   IconType_Pause = 0,
@@ -306,17 +307,29 @@ static void app_undo(MovieMaker* m) {
 }
 
 static void app_openproject(MovieMaker* m) {
-  undobuffer_clear(&m->undo);
-  videoclips_free(&m->clips);
-  m->trackpos = 0.0;
-  m->trackzoom = 800.0f / 32.0f;
-  m->trackoffset = 16.0f * 0.5f;
-  videoclips_load("project.json", &m->clips,
-                  &(VideoOpenParams){.aud_num_channels = saudio_channels(), .aud_sample_rate = saudio_sample_rate()});
+  char pathbuf[PATH_MAX];
+  const char* filters = "*.json";
+  if (pfd_open_dialog("Open Project", &filters, 1, pathbuf, PATH_MAX)) {
+    undobuffer_clear(&m->undo);
+    videoclips_free(&m->clips);
+    m->trackpos = 0.0;
+    m->trackzoom = 800.0f / 32.0f;
+    m->trackoffset = 16.0f * 0.5f;
+    videoclips_load(pathbuf, &m->clips,
+                    &(VideoOpenParams){.aud_num_channels = saudio_channels(), .aud_sample_rate = saudio_sample_rate()});
+  }
 }
 
 static void app_saveproject(MovieMaker* m) {
-  videoclips_save("project.json", &m->clips);
+  char pathbuf[PATH_MAX];
+  const char* filters = "*.json";
+  if (pfd_save_dialog("Save Project", "project.json", &filters, 1, pathbuf, PATH_MAX)) {
+    videoclips_save(pathbuf, &m->clips);
+  }
+}
+
+static void app_exportproject(MovieMaker* m) {
+  // TODO LOL
 }
 
 static void app_newproject(MovieMaker* m) {
@@ -400,6 +413,11 @@ static void app_event(const sapp_event* ev) {
         app_copyclip(m);
       }
       break;
+    case SAPP_KEYCODE_E:
+      if (ev->modifiers & SAPP_MODIFIER_CTRL) {
+        app_exportproject(m);
+      }
+      break;
     }
     break;
   }
@@ -439,7 +457,7 @@ static MenuAction app_menu(MovieMaker* m, Rect menu) {
                      .items = {{.name = "New Project", .shortcut = "Ctrl N", .action = app_newproject},
                                {.name = "Open Project", .shortcut = "Ctrl O", .action = app_openproject},
                                {.name = "Save Project", .shortcut = "Ctrl S", .action = app_saveproject},
-                               {.name = "Export Video"},
+                               {.name = "Export Video", .shortcut = "Ctrl E", .action = app_exportproject},
                                {.name = "Exit", .action = app_exit}}},
                     {.name = "Edit",
                      .numitems = 7,
@@ -1111,7 +1129,6 @@ static void app_frame(void) {
 
   if (action) {
     action(m);
-    m->selmenuidx = -1;
   }
 }
 
