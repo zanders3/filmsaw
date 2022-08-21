@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include <stdbool.h>
 
 typedef struct {
   uint32_t id;
@@ -9,11 +10,15 @@ typedef struct {
 
 void videopool_init();
 
+typedef struct VideoOpenParams {
+  int aud_num_channels, aud_sample_rate;
+  bool disable_audio;
+} VideoOpenParams;
 typedef struct {
   VideoId vid;
   const char* err;
 } VideoOpenRes;
-VideoOpenRes video_open(const char* path);
+VideoOpenRes video_open(const char* path, const VideoOpenParams* p);
 void video_nextframe(VideoId vid, double pos_secs);
 void video_close(VideoId vid);
 double video_total_secs(VideoId vid);

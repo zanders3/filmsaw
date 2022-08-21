@@ -16,5 +16,5 @@ typedef struct {
 
 void videoclips_push(VideoClips* l, VideoClip c);
 const char* videoclips_save(const char* path, const VideoClips* clips);
-const char* videoclips_load(const char* path, VideoClips* clips);
+const char* videoclips_load(const char* path, VideoClips* clips, const struct VideoOpenParams* p);
 void videoclips_free(VideoClips* l);

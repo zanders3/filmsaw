@@ -61,7 +61,7 @@ static double json_value_as_double(struct json_value_s* el) {
   }
 }
 
-const char* videoclips_load(const char* path, VideoClips* clips) {
+const char* videoclips_load(const char* path, VideoClips* clips, const VideoOpenParams* p) {
   FILE* f = fopen(path, "rb");
   if (f == NULL) {
     return "failed to open file";
@@ -103,7 +103,7 @@ const char* videoclips_load(const char* path, VideoClips* clips) {
                   parsedclip.track = (int)json_value_as_double(clipobjentry->value);
                 } else if (strcmp(clipobjentry->name->string, "path") == 0) {
                   const char* video_path = json_value_as_string(clipobjentry->value)->string;
-                  VideoOpenRes res = video_open(video_path);
+                  VideoOpenRes res = video_open(video_path, p);
                   if (res.err) {
                     DebugLog("failed to open %s: %s\n", path, res.err);
                     free(root);

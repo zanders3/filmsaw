@@ -9,10 +9,10 @@ Written in C using the Sokol Libs for graphics, window setup and input and FFmpe
 
 ![Screenshot](screenshot.PNG)
 
-Building
---------
+Building on Windows
+-------------------
 
-Open `moviemaker.sln` in Visual Studio 2022 Community Edition on Windows and mash F5. It works on my machine!
+Install [CMake 3.10](https://cmake.org/download/) and [Visual Studio 2022](https://visualstudio.microsoft.com/vs/) then run `cmake -G "Visual Studio 17 2022" .`. Open moviemaker.sln and mash F5.
 
 The code has been written in a cross platform-ish way but other platforms (Mac, Linux) are untested and unbuilt at this point.
 

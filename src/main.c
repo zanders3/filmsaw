@@ -13,6 +13,7 @@
 #include <math.h>
 #include <memory.h>
 #include <dirent.h>
+#include <sokol/sokol_audio.h>
 #include "video_clips.h"
 
 enum IconType {
@@ -141,7 +142,9 @@ void videosources_opendir(VideoSources* s, const char* path) {
       }
       char fullpath[PATH_MAX];
       snprintf(fullpath, PATH_MAX, "%s/%s", path, ent->d_name);
-      VideoOpenRes res = video_open(fullpath);
+      VideoOpenRes res = video_open(fullpath, &(VideoOpenParams){.aud_num_channels = saudio_channels(),
+                                                                 .aud_sample_rate = saudio_sample_rate(),
+                                                                 .disable_audio = true});
       if (res.err) {
         DebugLog("failed to open %s: %s", fullpath, res.err);
         continue;
@@ -219,6 +222,7 @@ static void app_init(void) {
   sg_setup(&(sg_desc){.context = sapp_sgcontext()});
   sgl_setup(&(sgl_desc_t){0});
   videopool_init();
+  saudio_setup(&(saudio_desc){.num_channels = 2, .buffer_frames = 2048 * 16, .packet_frames = 128 * 16});
 
   MovieMaker* m = &state;
   const int atlas_dim = round_pow2(512.0f * sapp_dpi_scale());
@@ -319,7 +323,9 @@ static void app_event(const sapp_event* ev) {
         m->trackpos = 0.0;
         m->trackzoom = 800.0f / 32.0f;
         m->trackoffset = 16.0f * 0.5f;
-        videoclips_load("project.json", &m->clips);
+        videoclips_load(
+            "project.json", &m->clips,
+            &(VideoOpenParams){.aud_num_channels = saudio_channels(), .aud_sample_rate = saudio_sample_rate()});
       }
       break;
     case SAPP_KEYCODE_S:
@@ -581,7 +587,8 @@ static void app_trackspanel(MovieMaker* m, Rect trackspanel) {
         if (m->placevideo) {
           char fullpath[PATH_MAX];
           snprintf(fullpath, PATH_MAX, "%s/%s", m->sources.filepath, m->placevideo->filename);
-          VideoOpenRes res = video_open(fullpath);
+          VideoOpenRes res = video_open(fullpath, &(VideoOpenParams){.aud_num_channels = saudio_channels(),
+                                                                     .aud_sample_rate = saudio_sample_rate()});
           if (res.err) {
             DebugLog("failed to open video %s: %s\n", fullpath, res.err);
           } else {
@@ -926,6 +933,7 @@ static void app_frame(void) {
 }
 
 static void app_cleanup(void) {
+  saudio_shutdown();
 }
 
 sapp_desc sokol_main(int argc, char* argv[]) {

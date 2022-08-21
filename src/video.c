@@ -5,6 +5,10 @@
 #include <libavutil/imgutils.h>
 #include <sokol/sokol_gfx.h>
 #include <assert.h>
+#include <thread/thread.h>
+#include <libavutil/opt.h>
+#include <libswresample/swresample.h>
+#include <sokol/sokol_audio.h>
 
 typedef struct {
   uint32_t id;
@@ -18,6 +22,13 @@ typedef struct {
   uint8_t* imgbuf;
   int imgbuflen;
   int vidstreamidx;
+
+  struct SwrContext* swr_ctx;
+  AVCodecParameters* aud_codec_params;
+  AVCodecContext* aud_codec_ctx;
+  int aud_num_channels, aud_sample_rate;
+  int audiostreamidx, audbuflinesize;
+  uint8_t** audbuf;
 
   char filepath[_MAX_PATH + 1];
 
@@ -112,7 +123,7 @@ static void _video_free(VideoId id) {
   *v = (Video){0};
 }
 
-VideoOpenRes video_open(const char* path) {
+VideoOpenRes video_open(const char* path, const VideoOpenParams* p) {
   VideoId vid = _video_alloc();
   Video* v = _video_at(vid);
   snprintf(v->filepath, sizeof(v->filepath), "%.*s", (int)strlen(path), path);
@@ -127,12 +138,18 @@ VideoOpenRes video_open(const char* path) {
     err = "Failed to find video stream info";
     goto cleanup;
   }
+  v->vidstreamidx = -1;
+  v->audiostreamidx = -1;
   for (uint32_t i = 0; i < v->fmt_ctx->nb_streams; i++) {
-    if (v->fmt_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+    enum AVMediaType type = v->fmt_ctx->streams[i]->codecpar->codec_type;
+    if (type == AVMEDIA_TYPE_VIDEO && v->vidstreamidx == -1) {
       v->codec_params = v->fmt_ctx->streams[i]->codecpar;
       v->total_secs = (double)v->fmt_ctx->duration * av_q2d(AV_TIME_BASE_Q);
       v->vidstreamidx = i;
-      break;
+    }
+    if (type == AVMEDIA_TYPE_AUDIO && v->audiostreamidx == -1) {
+      v->aud_codec_params = v->fmt_ctx->streams[i]->codecpar;
+      v->audiostreamidx = i;
     }
   }
   if (v->codec_params == NULL) {
@@ -153,7 +170,7 @@ VideoOpenRes video_open(const char* path) {
     err = "Failed to setup codec";
     goto cleanup;
   }
-  // Open codec
+  // open video codec
   if (avcodec_open2(v->codec_ctx, codec, NULL) < 0) {
     err = "Failed to open codec";
     goto cleanup;
@@ -177,9 +194,53 @@ VideoOpenRes video_open(const char* path) {
   v->frame_rgb = av_frame_alloc();
   av_image_fill_arrays(v->frame_rgb->data, v->frame_rgb->linesize, v->imgbuf, AV_PIX_FMT_RGBA, v->codec_params->width,
                        v->codec_params->height, 1);
+  // setup audio track if it exists
+  if (v->aud_codec_params && !p->disable_audio) {
+    const AVCodec* aud_codec = avcodec_find_decoder(v->aud_codec_params->codec_id);
+    if (aud_codec == NULL) {
+      err = "Unsupported audio codec";
+      goto cleanup;
+    }
+    v->aud_codec_ctx = avcodec_alloc_context3(aud_codec);
+    if (v->aud_codec_ctx == NULL) {
+      err = "Unsupported audio codec context";
+      goto cleanup;
+    }
+    if (avcodec_parameters_to_context(v->aud_codec_ctx, v->aud_codec_params) != 0) {
+      err = "Failed to setup audio codec";
+      goto cleanup;
+    }
+    if (avcodec_open2(v->aud_codec_ctx, aud_codec, NULL) < 0) {
+      err = "Failed to open audio codec";
+      goto cleanup;
+    }
+    v->swr_ctx = swr_alloc();
+    av_opt_set_chlayout(v->swr_ctx, "in_chlayout", &v->aud_codec_ctx->ch_layout, 0);
+    av_opt_set_int(v->swr_ctx, "in_sample_rate", v->aud_codec_ctx->sample_rate, 0);
+    av_opt_set_sample_fmt(v->swr_ctx, "in_sample_fmt", v->aud_codec_ctx->sample_fmt, 0);
+
+    v->aud_sample_rate = p->aud_sample_rate;
+    v->aud_num_channels = 2; // p->aud_num_channels;
+    AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
+    AVChannelLayout mono = AV_CHANNEL_LAYOUT_MONO;
+    av_opt_set_chlayout(v->swr_ctx, "out_chlayout", v->aud_num_channels == 2 ? &stereo : &mono, 0);
+    av_opt_set_int(v->swr_ctx, "out_sample_rate", (int64_t)v->aud_sample_rate, 0);
+    av_opt_set_sample_fmt(v->swr_ctx, "out_sample_fmt", AV_SAMPLE_FMT_FLTP, 0);
+
+    int ret = swr_init(v->swr_ctx);
+    if (ret < 0) {
+      err = "Failed to setup audio rescale";
+      goto cleanup;
+    }
+    if (av_samples_alloc_array_and_samples(&v->audbuf, &v->audbuflinesize, v->aud_num_channels, v->aud_sample_rate,
+                                           AV_SAMPLE_FMT_FLTP, 0) < 0) {
+      err = "Failed to alloc audio buffer";
+      goto cleanup;
+    }
+  }
 cleanup:
   if (err != NULL) {
-    _video_free(vid);
+    video_close(vid);
     return (VideoOpenRes){.err = err};
   }
   return (VideoOpenRes){.vid = vid};
@@ -199,6 +260,9 @@ void video_nextframe(VideoId vid, double pos_secs) {
         (int64_t)((double)v->pos_secs * av_q2d(av_inv_q(v->fmt_ctx->streams[v->vidstreamidx]->time_base)));
     av_seek_frame(v->fmt_ctx, v->vidstreamidx, timestamp, AVSEEK_FLAG_BACKWARD);
     avcodec_flush_buffers(v->codec_ctx);
+    if (v->aud_codec_ctx) {
+      avcodec_flush_buffers(v->aud_codec_ctx);
+    }
     v->next_swap_secs = 0.0f;
     AVPacket packet;
     double time_base = av_q2d(v->fmt_ctx->streams[v->vidstreamidx]->time_base);
@@ -226,23 +290,56 @@ void video_nextframe(VideoId vid, double pos_secs) {
   if (v->next_swap_secs > v->pos_secs) {
     return;
   }
+  bool did_image = false;
   AVPacket packet;
   while (av_read_frame(v->fmt_ctx, &packet) >= 0) {
-    if (avcodec_send_packet(v->codec_ctx, &packet) < 0) {
+    if (packet.stream_index == v->vidstreamidx) {
+      if (avcodec_send_packet(v->codec_ctx, &packet) < 0) {
+        av_packet_unref(&packet);
+        continue;
+      }
+      if (avcodec_receive_frame(v->codec_ctx, v->frame_raw) >= 0) {
+        sws_scale(v->sws_ctx, v->frame_raw->data, v->frame_raw->linesize, 0, v->codec_params->height,
+                  v->frame_rgb->data, v->frame_rgb->linesize);
+        if (!did_image) {
+          sg_update_image(v->img, &(sg_image_data){.subimage[0][0] = {.ptr = v->imgbuf, .size = v->imgbuflen}});
+          did_image = true;
+        }
+        v->next_swap_secs = (double)v->frame_raw->pts * av_q2d(v->fmt_ctx->streams[v->vidstreamidx]->time_base);
+        av_frame_unref(v->frame_raw);
+      }
+    } else if (packet.stream_index == v->audiostreamidx) {
+      if (avcodec_send_packet(v->aud_codec_ctx, &packet) < 0) {
+        av_packet_unref(&packet);
+        continue;
+      }
+      if (avcodec_receive_frame(v->aud_codec_ctx, v->frame_raw) >= 0) {
+        int numsamples =
+            av_rescale_rnd(v->frame_raw->nb_samples, v->aud_sample_rate, v->frame_raw->sample_rate, AV_ROUND_UP);
+        int ret = swr_convert(v->swr_ctx, v->audbuf, numsamples, (const uint8_t**)v->frame_raw->data,
+                              v->frame_raw->nb_samples);
+        if (ret >= 0) {
+          int dst_bufsize =
+              av_samples_get_buffer_size(&v->audbuflinesize, v->aud_num_channels, ret, AV_SAMPLE_FMT_FLTP, 1);
+          const float* framesl = (float*)v->audbuf[0];
+          const float* framesr = (float*)v->audbuf[1];
+          int num_frames = dst_bufsize / (sizeof(float) * 2);
+          float* frames_tmp = malloc(dst_bufsize);
+          for (int i = 0; i < num_frames; i++) {
+            frames_tmp[i * 2] = framesl[i];
+            frames_tmp[(i * 2) + 1] = framesr[i];
+          }
+          saudio_push(frames_tmp, num_frames);
+          free(frames_tmp);
+        }
+      }
+      av_frame_unref(v->frame_raw);
       av_packet_unref(&packet);
       continue;
-    }
-    if (avcodec_receive_frame(v->codec_ctx, v->frame_raw) >= 0) {
-      sws_scale(v->sws_ctx, v->frame_raw->data, v->frame_raw->linesize, 0, v->codec_params->height, v->frame_rgb->data,
-                v->frame_rgb->linesize);
-      sg_update_image(v->img, &(sg_image_data){.subimage[0][0] = {.ptr = v->imgbuf, .size = v->imgbuflen}});
-      v->next_swap_secs = (double)v->frame_raw->pts * av_q2d(v->fmt_ctx->streams[v->vidstreamidx]->time_base);
-      av_frame_unref(v->frame_raw);
     }
     av_packet_unref(&packet);
     break;
   }
-  av_packet_unref(&packet);
 }
 
 void video_close(VideoId vid) {
@@ -265,6 +362,9 @@ void video_close(VideoId vid) {
   sg_destroy_image(v->img);
   if (v->imgbuf) {
     av_free(v->imgbuf);
+  }
+  if (v->audbuf) {
+    av_free(v->audbuf);
   }
   _video_free(vid);
 }

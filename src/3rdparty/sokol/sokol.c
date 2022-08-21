@@ -16,6 +16,8 @@
 #include <fontstash/fontstash.h>
 #define SOKOL_FONTSTASH_IMPL
 #include <sokol/sokol_fontstash.h>
+#define SOKOL_AUDIO_IMPL
+#include <sokol/sokol_audio.h>
 
 #ifdef _DEBUG
 void DebugLogStr(const char* s) {
