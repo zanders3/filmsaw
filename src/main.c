@@ -89,6 +89,7 @@ void undobuffer_redo(UndoBuffer* buffer, VideoClips* clips) {
 typedef struct {
   bool is_dir;
   sg_image thumbnail;
+  int thumbnail_width, thumbnail_height;
   char filename[PATH_MAX];
   double video_total_secs;
 } VideoSource;
@@ -124,6 +125,7 @@ void videosources_opendir(VideoSources* s, const char* path) {
       continue; // only look at files and directories
     }
     sg_image thumbnail = (sg_image){0};
+    int thumbnail_width = 100, thumbnail_height = 100;
     double vid_total_secs = 0.0;
     if (ent->d_type == DT_REG) {
       char* dot = strrchr(ent->d_name, '.');
@@ -149,7 +151,7 @@ void videosources_opendir(VideoSources* s, const char* path) {
         DebugLog("failed to open %s: %s", fullpath, res.err);
         continue;
       }
-      thumbnail = video_make_thumbnail(res.vid, 0.0, 100, 100);
+      thumbnail = video_make_thumbnail(res.vid, 0.0, &thumbnail_width, &thumbnail_height);
       vid_total_secs = video_total_secs(res.vid);
       video_close(res.vid);
     } else {
@@ -164,8 +166,11 @@ void videosources_opendir(VideoSources* s, const char* path) {
       s->sources = (VideoSource*)newbuf;
     }
     VideoSource* source = &s->sources[s->num++];
-    *source =
-        (VideoSource){.is_dir = ent->d_type == DT_DIR, .thumbnail = thumbnail, .video_total_secs = vid_total_secs};
+    *source = (VideoSource){.is_dir = ent->d_type == DT_DIR,
+                            .thumbnail = thumbnail,
+                            .thumbnail_width = thumbnail_width,
+                            .thumbnail_height = thumbnail_height,
+                            .video_total_secs = vid_total_secs};
     snprintf(source->filename, PATH_MAX, "%s", ent->d_name);
   }
   snprintf(s->filepath, PATH_MAX, "%s", path);
@@ -184,7 +189,7 @@ typedef struct MovieMaker {
   double trackpos, tracklen;
   bool didseektrack;
 
-  int selclipidx;
+  int selclipidx, selmenuidx;
   float selclipdragstart;
   double selclipdragstartoffset;
   bool selclipdragstarted;
@@ -231,7 +236,7 @@ static void app_init(void) {
   m->font_mono = fonsAddFontMem(m->font_ctx, "mono", VeraMono_ttf, VeraMono_ttf_len, false);
   m->font_mono_bold = fonsAddFontMem(m->font_ctx, "monob", VeraMono_Bold_ttf, VeraMono_Bold_ttf_len, false);
   m->ui = ui_init(sapp_dpi_scale(), m->font_ctx, m->font_sans);
-
+  m->selmenuidx = -1;
   {
     int w, h, chans = 4;
     stbi_uc* icons_png_data = stbi_load_from_memory(icons_png, icons_png_len, &w, &h, &chans, 4);
@@ -258,8 +263,7 @@ static void app_init(void) {
   videosources_opendir(&m->sources, cwd);
 }
 
-static void app_sliceclip(void) {
-  MovieMaker* m = &state;
+static void app_sliceclip(MovieMaker* m) {
   if (m->selclipidx == -1) {
     return;
   }
@@ -268,19 +272,22 @@ static void app_sliceclip(void) {
   if (clip->pos > pos_secs || pos_secs > (clip->pos + clip->clipend - clip->clipstart)) {
     return;
   }
-  sg_image thumbnail = video_make_thumbnail(clip->vid, (pos_secs - clip->pos) + clip->clipstart, 100, 100);
+  int thumbnail_width = 100, thumbnail_height = 100;
+  sg_image thumbnail =
+      video_make_thumbnail(clip->vid, (pos_secs - clip->pos) + clip->clipstart, &thumbnail_width, &thumbnail_height);
   videoclips_push(&m->clips, (VideoClip){.pos = pos_secs,
                                          .track = clip->track,
                                          .clipstart = (pos_secs - clip->pos) + clip->clipstart,
                                          .clipend = clip->clipend,
                                          .vid = clip->vid,
-                                         .thumbnail = thumbnail});
+                                         .thumbnail = thumbnail,
+                                         .thumbnail_width = thumbnail_width,
+                                         .thumbnail_height = thumbnail_height});
   clip->clipend = pos_secs - clip->pos + clip->clipstart;
   undobuffer_push(&m->undo, &m->clips);
 }
 
-static void app_deleteclip(void) {
-  MovieMaker* m = &state;
+static void app_deleteclip(MovieMaker* m) {
   if (m->selclipidx == -1) {
     return;
   }
@@ -290,6 +297,54 @@ static void app_deleteclip(void) {
   undobuffer_push(&m->undo, &m->clips);
 }
 
+static void app_redo(MovieMaker* m) {
+  undobuffer_redo(&m->undo, &m->clips);
+}
+
+static void app_undo(MovieMaker* m) {
+  undobuffer_undo(&m->undo, &m->clips);
+}
+
+static void app_openproject(MovieMaker* m) {
+  undobuffer_clear(&m->undo);
+  videoclips_free(&m->clips);
+  m->trackpos = 0.0;
+  m->trackzoom = 800.0f / 32.0f;
+  m->trackoffset = 16.0f * 0.5f;
+  videoclips_load("project.json", &m->clips,
+                  &(VideoOpenParams){.aud_num_channels = saudio_channels(), .aud_sample_rate = saudio_sample_rate()});
+}
+
+static void app_saveproject(MovieMaker* m) {
+  videoclips_save("project.json", &m->clips);
+}
+
+static void app_newproject(MovieMaker* m) {
+  (void)m;
+  undobuffer_clear(&m->undo);
+  videoclips_free(&m->clips);
+  m->trackpos = 0.0;
+  m->trackzoom = 800.0f / 32.0f;
+  m->trackoffset = 16.0f * 0.5f;
+}
+
+static void app_cutclip(MovieMaker* m) {
+  (void)m;
+}
+
+static void app_copyclip(MovieMaker* m) {
+  (void)m;
+}
+
+static void app_pasteclip(MovieMaker* m) {
+  (void)m;
+}
+
+static void app_exit(MovieMaker* m) {
+  (void)m;
+  sapp_request_quit();
+}
+
 static void app_event(const sapp_event* ev) {
   MovieMaker* m = &state;
   ui_handle_event(m->ui, ev);
@@ -297,41 +352,54 @@ static void app_event(const sapp_event* ev) {
   case SAPP_EVENTTYPE_KEY_DOWN:
     switch (ev->key_code) {
     case SAPP_KEYCODE_X:
-      app_sliceclip();
+      if (ev->modifiers & SAPP_MODIFIER_CTRL) {
+        app_cutclip(m);
+      } else {
+        app_sliceclip(m);
+      }
       break;
     case SAPP_KEYCODE_DELETE:
-      app_deleteclip();
+      app_deleteclip(m);
       break;
     case SAPP_KEYCODE_Z:
       if (ev->modifiers & SAPP_MODIFIER_CTRL) {
         if (ev->modifiers & SAPP_MODIFIER_SHIFT) {
-          undobuffer_redo(&m->undo, &m->clips);
+          app_redo(m);
         } else {
-          undobuffer_undo(&m->undo, &m->clips);
+          app_undo(m);
         }
       }
       break;
     case SAPP_KEYCODE_Y:
       if (ev->modifiers & SAPP_MODIFIER_CTRL) {
-        undobuffer_redo(&m->undo, &m->clips);
+        app_redo(m);
       }
       break;
     case SAPP_KEYCODE_O:
       if (ev->modifiers & SAPP_MODIFIER_CTRL) {
-        undobuffer_clear(&m->undo);
-        videoclips_free(&m->clips);
-        m->trackpos = 0.0;
-        m->trackzoom = 800.0f / 32.0f;
-        m->trackoffset = 16.0f * 0.5f;
-        videoclips_load(
-            "project.json", &m->clips,
-            &(VideoOpenParams){.aud_num_channels = saudio_channels(), .aud_sample_rate = saudio_sample_rate()});
+        app_openproject(m);
       }
       break;
     case SAPP_KEYCODE_S:
       if (ev->modifiers & SAPP_MODIFIER_CTRL) {
-        videoclips_save("project.json", &m->clips);
+        app_saveproject(m);
       }
+      break;
+    case SAPP_KEYCODE_N:
+      if (ev->modifiers & SAPP_MODIFIER_CTRL) {
+        app_newproject(m);
+      }
+      break;
+    case SAPP_KEYCODE_V:
+      if (ev->modifiers & SAPP_MODIFIER_CTRL) {
+        app_pasteclip(m);
+      }
+      break;
+    case SAPP_KEYCODE_C:
+      if (ev->modifiers & SAPP_MODIFIER_CTRL) {
+        app_copyclip(m);
+      }
+      break;
     }
     break;
   }
@@ -352,6 +420,103 @@ BoxStyle track_style = {.bg_color = {51, 77, 128, 255}, .border_radius = 1.0f};
 BoxStyle track_style_shadow = {.bg_color = {0, 0, 0, 255}, .border_radius = 1.0f, .blur_amount = 0.1f};
 BoxStyle track_style_sel = {.bg_color = {77, 100, 144, 255}, .border_radius = 1.0f};
 Color trackmarker_col = {66, 109, 174, 255};
+
+typedef void (*MenuAction)(MovieMaker* m);
+typedef struct {
+  const char* name;
+  const char* shortcut;
+  MenuAction action;
+} MenuItem;
+typedef struct {
+  const char* name;
+  int numitems;
+  MenuItem items[9];
+} MenuBar;
+
+static MenuAction app_menu(MovieMaker* m, Rect menu) {
+  MenuBar bars[] = {{.name = "File",
+                     .numitems = 5,
+                     .items = {{.name = "New Project", .shortcut = "Ctrl N", .action = app_newproject},
+                               {.name = "Open Project", .shortcut = "Ctrl O", .action = app_openproject},
+                               {.name = "Save Project", .shortcut = "Ctrl S", .action = app_saveproject},
+                               {.name = "Export Video"},
+                               {.name = "Exit", .action = app_exit}}},
+                    {.name = "Edit",
+                     .numitems = 7,
+                     .items =
+                         {
+                             {.name = "Undo", .shortcut = "Ctrl Z", .action = app_undo},
+                             {.name = "Redo", .shortcut = "Ctrl Y", .action = app_redo},
+                             {.name = "Cut Clip", .shortcut = "Ctrl X", .action = app_cutclip},
+                             {.name = "Copy Clip", .shortcut = "Ctrl C", .action = app_copyclip},
+                             {.name = "Paste Clip", .shortcut = "Ctrl V", .action = app_pasteclip},
+                             {.name = "Slice Clip", .shortcut = "X", .action = app_sliceclip},
+                             {.name = "Delete Clip", .shortcut = "Delete", .action = app_deleteclip},
+                         }},
+                    {.name = "Help", .numitems = 1, .items = {{.name = "About"}}}};
+  ui_draw_box(m->ui, rect_inset_bottom(menu, 2.0f), &(BoxStyle){.bg_color = {29, 29, 29, 255}});
+  rect_cut_left(&menu, 5.0f);
+  MenuAction action = NULL;
+  for (int i = 0; i < 3; i++) {
+    MenuBar* bar = &bars[i];
+    float w =
+        ui_measure_text_wh(m->ui, bar->name, NULL, &(DrawTextOptions){.font_size = 14.0f}, 100.0f, NULL, NULL) + 14.0f;
+    Rect barrect = rect_contract(rect_cut_left(&menu, w), 2.0f);
+    UIEvent evt = ui_get_event(m->ui, barrect);
+    if (evt & UIEvent_MouseHover || (m->selmenuidx == i)) {
+      ui_draw_box(m->ui, barrect, &(BoxStyle){.bg_color = {71, 114, 179, 255}, .border_radius = 0.5f});
+      ui_draw_box(m->ui, rect_contract(barrect, 1.0f),
+                  &(BoxStyle){.bg_color = {58, 89, 134, 255}, .border_radius = 0.5f});
+    }
+    if (evt & UIEvent_MouseClick) {
+      m->selmenuidx = i;
+    }
+    ui_draw_text(m->ui, rect_translate(barrect, 4.0f, 3.0f), bar->name, NULL, &(DrawTextOptions){.font_size = 14.0f});
+    const float item_height = 18.0f;
+    bool didleave = false, didenter = false;
+    if (m->selmenuidx == i) {
+      if (evt & UIEvent_MouseLeave) {
+        didleave = true;
+      }
+      Rect totalpos = (Rect){barrect.minx - 4.0f, barrect.maxy - 4.0f, barrect.minx + 180.0f,
+                             barrect.maxy + 4.0f + item_height * bar->numitems};
+      ui_draw_box(m->ui, rect_translate(totalpos, 2.0f, 2.0f),
+                  &(BoxStyle){.bg_color = {0, 0, 0, 255}, .border_radius = 0.5f, .blur_amount = 0.1f});
+      ui_draw_box(m->ui, rect_contract(totalpos, 1.0f),
+                  &(BoxStyle){.bg_color = {24, 24, 24, 255}, .border_radius = 0.5f});
+      totalpos = rect_contract(totalpos, 4.0f);
+      for (int j = 0; j < bar->numitems; j++) {
+        Rect pos = rect_cut_top(&totalpos, item_height);
+        UIEvent evt = ui_get_event(m->ui, pos);
+        if (evt & UIEvent_MouseLeave) {
+          didleave = true;
+        }
+        if (evt & (UIEvent_MouseHover | UIEvent_MouseEnter)) {
+          didenter = true;
+        }
+        if (evt & UIEvent_MouseClick && bar->items[j].action) {
+          action = bar->items[j].action;
+        }
+        pos = rect_contract(pos, 1.0f);
+        if (evt & UIEvent_MouseHover) {
+          ui_draw_box(m->ui, pos, &(BoxStyle){.bg_color = {71, 114, 179, 255}, .border_radius = 0.5f});
+        }
+        rect_cut_left(&pos, rect_height(pos) + 1.0f);
+        ui_draw_text(m->ui, rect_contract(pos, 1.0f), bar->items[j].name, NULL, &(DrawTextOptions){.font_size = 14.0f});
+        if (bar->items[j].shortcut) {
+          ui_draw_text(m->ui, rect_contract(pos, 1.0f), bar->items[j].shortcut, NULL,
+                       &(DrawTextOptions){.font_size = 14.0f, .align = TextAlign_Right, .col = {255, 255, 255, 128}});
+        }
+      }
+      if (didleave && !didenter) {
+        m->selmenuidx = -1;
+      }
+    } else {
+      ui_skip_ids(m->ui, bar->numitems);
+    }
+  }
+  return action;
+}
 
 static void app_trackspanel(MovieMaker* m, Rect trackspanel) {
 
@@ -500,7 +665,9 @@ static void app_trackspanel(MovieMaker* m, Rect trackspanel) {
       ui_scissor(m->ui, &clipname);
       ui_draw_text(m->ui, clipname, video_filename(clip->vid), NULL, &(DrawTextOptions){.font_size = 14.0f});
       ui_scissor(m->ui, NULL);
-      ui_draw_image(m->ui, rect_inset_left(track, 80.0f), clip->thumbnail, (Rect){0.0f, 0.0f, 1.0f, 1.0f});
+      ui_draw_image(
+          m->ui, rect_fit(rect_inset_left(track, 80.0f), (float)clip->thumbnail_width, (float)clip->thumbnail_height),
+          clip->thumbnail, (Rect){0.0f, 0.0f, 1.0f, 1.0f});
     }
   }
 
@@ -581,7 +748,10 @@ static void app_trackspanel(MovieMaker* m, Rect trackspanel) {
           ui_scissor(m->ui, &clipname);
           ui_draw_text(m->ui, clipname, source->filename, NULL, &(DrawTextOptions){.font_size = 14.0f});
           ui_scissor(m->ui, NULL);
-          ui_draw_image(m->ui, rect_inset_left(track, 80.0f), source->thumbnail, (Rect){0.0f, 0.0f, 1.0f, 1.0f});
+          ui_draw_image(
+              m->ui,
+              rect_fit(rect_inset_left(track, 80.0f), (float)source->thumbnail_width, (float)source->thumbnail_height),
+              source->thumbnail, (Rect){0.0f, 0.0f, 1.0f, 1.0f});
         }
         // dragging has stopped and we're in a valid position: actually place the video!
         if (m->placevideo) {
@@ -592,11 +762,14 @@ static void app_trackspanel(MovieMaker* m, Rect trackspanel) {
           if (res.err) {
             DebugLog("failed to open video %s: %s\n", fullpath, res.err);
           } else {
-            sg_image thumbnail = video_make_thumbnail(res.vid, 0.0, 100, 100);
+            int thumbnail_width = 100, thumbnail_height = 100;
+            sg_image thumbnail = video_make_thumbnail(res.vid, 0.0, &thumbnail_width, &thumbnail_height);
             videoclips_push(&m->clips, (VideoClip){.vid = res.vid,
                                                    .pos = pos,
                                                    .clipend = source->video_total_secs,
                                                    .thumbnail = thumbnail,
+                                                   .thumbnail_width = thumbnail_width,
+                                                   .thumbnail_height = thumbnail_height,
                                                    .track = trackidx});
             undobuffer_push(&m->undo, &m->clips);
           }
@@ -863,7 +1036,8 @@ static void app_sourcepanel(MovieMaker* m, Rect sourcepanel) {
       ui_draw_image(m->ui, rect_centre(grid, 30.0f, 30.0f), m->icons, m->iconrects[IconType_Folder]);
     } else if (source->thumbnail.id) {
       rect_cut_top(&grid, 15.0f);
-      ui_draw_image(m->ui, grid, source->thumbnail, (Rect){0.0f, 0.0f, 1.0f, 1.0f});
+      ui_draw_image(m->ui, rect_fit(grid, (float)source->thumbnail_width, (float)source->thumbnail_height),
+                    source->thumbnail, (Rect){0.0f, 0.0f, 1.0f, 1.0f});
     }
     gx++;
   }
@@ -900,7 +1074,7 @@ static void app_frame(void) {
 
   Rect window = ui_windowrect(m->ui, sapp_widthf(), sapp_heightf());
 
-  rect_cut_top(&window, 25.0f); // menu bar
+  Rect menu = rect_cut_top(&window, 25.0f);
 
   Rect trackspanel = rect_contract(rect_cut_bottom(&window, 256.0f), 1.0f);
   app_trackspanel(m, trackspanel);
@@ -919,9 +1093,13 @@ static void app_frame(void) {
     ui_scissor(m->ui, NULL);
     if (m->dragvideo->thumbnail.id) {
       rect_cut_top(&dragvideopos, 15.0f);
-      ui_draw_image(m->ui, dragvideopos, m->dragvideo->thumbnail, (Rect){0.0f, 0.0f, 1.0f, 1.0f});
+      ui_draw_image(m->ui,
+                    rect_fit(dragvideopos, (float)m->dragvideo->thumbnail_width, (float)m->dragvideo->thumbnail_height),
+                    m->dragvideo->thumbnail, (Rect){0.0f, 0.0f, 1.0f, 1.0f});
     }
   }
+
+  MenuAction action = app_menu(m, menu);
 
   sfons_flush(m->font_ctx);
   sg_begin_default_pass(
@@ -930,6 +1108,11 @@ static void app_frame(void) {
   sgl_draw();
   sg_end_pass();
   sg_commit();
+
+  if (action) {
+    action(m);
+    m->selmenuidx = -1;
+  }
 }
 
 static void app_cleanup(void) {

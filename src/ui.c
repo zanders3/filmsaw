@@ -70,6 +70,13 @@ Rect rect_centre(Rect r, float w, float h) {
   float mx = r.minx + (rw - w) * 0.5f, my = r.miny + (rh - h) * 0.5f;
   return (Rect){mx, my, mx + w, my + h};
 }
+Rect rect_fit(Rect r, float w, float h) {
+  float rw = r.maxx - r.minx, rh = r.maxy - r.miny;
+  float th = h * rw / w;
+  float tw = w * rh / h;
+  float scale = th > h ? tw / w : th / h;
+  return rect_centre(r, w * scale, h * scale);
+}
 Rect rect_cut_side(Rect* r, RectCutSide side, float w, float h) {
   switch (side) {
   default:
@@ -135,6 +142,9 @@ Rect ui_windowrect(UI* u, float w, float h) {
   return (Rect){.maxx = w * u->inv_dpi_scale, .maxy = h * u->inv_dpi_scale};
 }
 
+void ui_skip_ids(UI* u, int count) {
+  u->widget_id += count;
+}
 UIEvent ui_get_event(UI* u, Rect pos) {
   int widget_id = u->widget_id++;
   if (u->evts & (UIEvent_MouseDown | UIEvent_MouseMidDown)) {

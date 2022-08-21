@@ -114,7 +114,10 @@ const char* videoclips_load(const char* path, VideoClips* clips, const VideoOpen
                 }
               }
               if (parsedclip.vid.id) {
-                parsedclip.thumbnail = video_make_thumbnail(parsedclip.vid, parsedclip.clipstart, 100, 100);
+                int width = 100, height = 100;
+                parsedclip.thumbnail = video_make_thumbnail(parsedclip.vid, parsedclip.clipstart, &width, &height);
+                parsedclip.thumbnail_width = width;
+                parsedclip.thumbnail_height = height;
                 videoclips_push(clips, parsedclip);
               }
             }

@@ -36,6 +36,7 @@ Rect rect_translate(Rect r, float x, float y);
 float rect_width(Rect r);
 float rect_height(Rect r);
 Rect rect_centre(Rect r, float w, float h);
+Rect rect_fit(Rect r, float w, float h);
 
 bool rect_contains(const Rect* r, float x, float y);
 
@@ -71,6 +72,7 @@ typedef enum {
 typedef struct sapp_event sapp_event;
 void ui_frame(UI* u);
 void ui_handle_event(UI* u, const sapp_event* e);
+void ui_skip_ids(UI* u, int count);
 UIEvent ui_get_event(UI* u, Rect pos);
 
 typedef struct {

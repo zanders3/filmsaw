@@ -6,6 +6,7 @@ typedef struct {
   double pos, clipstart, clipend;
   int track;
   sg_image thumbnail;
+  int thumbnail_width, thumbnail_height;
   VideoId vid;
 } VideoClip;
 

@@ -315,7 +315,7 @@ void video_nextframe(VideoId vid, double pos_secs) {
       }
       if (avcodec_receive_frame(v->aud_codec_ctx, v->frame_raw) >= 0) {
         int numsamples =
-            av_rescale_rnd(v->frame_raw->nb_samples, v->aud_sample_rate, v->frame_raw->sample_rate, AV_ROUND_UP);
+            (int)av_rescale_rnd(v->frame_raw->nb_samples, v->aud_sample_rate, v->frame_raw->sample_rate, AV_ROUND_UP);
         int ret = swr_convert(v->swr_ctx, v->audbuf, numsamples, (const uint8_t**)v->frame_raw->data,
                               v->frame_raw->nb_samples);
         if (ret >= 0) {
@@ -393,7 +393,7 @@ const char* video_filepath(VideoId vid) {
   return _video_at(vid)->filepath;
 }
 
-struct sg_image video_make_thumbnail(VideoId vid, double pos_secs, int width, int height) {
+struct sg_image video_make_thumbnail(VideoId vid, double pos_secs, int* width, int* height) {
   Video* v = _video_at(vid);
   int64_t timestamp = (int64_t)((double)pos_secs * av_q2d(av_inv_q(v->fmt_ctx->streams[v->vidstreamidx]->time_base)));
   av_seek_frame(v->fmt_ctx, v->vidstreamidx, timestamp, AVSEEK_FLAG_BACKWARD);
@@ -405,18 +405,25 @@ struct sg_image video_make_thumbnail(VideoId vid, double pos_secs, int width, in
       continue;
     }
     if (avcodec_receive_frame(v->codec_ctx, v->frame_raw) >= 0) {
+      int tgtheight = v->codec_params->height * *width / v->codec_params->width;
+      int tgtwidth = v->codec_params->width * *height / v->codec_params->height;
+      if (tgtheight < *height) {
+        *height = tgtheight;
+      } else {
+        *width = tgtwidth;
+      }
       struct SwsContext* sws_ctx =
-          sws_getContext(v->codec_params->width, v->codec_params->height, v->codec_params->format, width, height,
+          sws_getContext(v->codec_params->width, v->codec_params->height, v->codec_params->format, *width, *height,
                          AV_PIX_FMT_RGBA, SWS_BILINEAR, NULL, NULL, NULL);
-      int imgbuflen = av_image_get_buffer_size(AV_PIX_FMT_RGBA, width, height, 1);
+      int imgbuflen = av_image_get_buffer_size(AV_PIX_FMT_RGBA, *width, *height, 1);
       void* imgbuf = av_malloc(imgbuflen);
       AVFrame* frame_rgb = av_frame_alloc();
-      av_image_fill_arrays(frame_rgb->data, frame_rgb->linesize, imgbuf, AV_PIX_FMT_RGBA, width, height, 1);
+      av_image_fill_arrays(frame_rgb->data, frame_rgb->linesize, imgbuf, AV_PIX_FMT_RGBA, *width, *height, 1);
       sws_scale(sws_ctx, v->frame_raw->data, v->frame_raw->linesize, 0, v->codec_params->height, frame_rgb->data,
                 frame_rgb->linesize);
       sg_image img = sg_make_image(&(sg_image_desc){
-          .width = width,
-          .height = height,
+          .width = *width,
+          .height = *height,
           .pixel_format = SG_PIXELFORMAT_RGBA8,
           .min_filter = SG_FILTER_LINEAR,
           .mag_filter = SG_FILTER_LINEAR,
