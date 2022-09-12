@@ -16,6 +16,7 @@
 #include <sokol/sokol_audio.h>
 #include "video_clips.h"
 #include <portable_file_dialogs.h>
+#include <thread/thread.h>
 
 enum IconType {
   IconType_Pause = 0,
@@ -207,6 +208,9 @@ typedef struct MovieMaker {
   sg_image icons;
   Rect iconrects[IconType_Count];
   Rect iconrectshflipped[IconType_Count];
+
+  thread_mutex_t aud_thread_mtx;
+  VideoId curaud_video;
 } MovieMaker;
 MovieMaker state;
 
@@ -224,13 +228,30 @@ static int round_pow2(float v) {
 
 int fonsAddFontMem(FONScontext* stash, const char* name, unsigned char* data, int dataSize, int freeData);
 
+static void app_audio_callback(float* buffer, int num_frames, int num_channels) {
+  MovieMaker* m = &state;
+  if (m->curaud_video.id) {
+    thread_mutex_lock(&m->aud_thread_mtx);
+    video_getaudio_underlock(m->curaud_video, buffer, num_frames);
+    thread_mutex_unlock(&m->aud_thread_mtx);
+  } else {
+    for (int i = 0, j = 0; i < num_frames; i++) {
+      buffer[j++] = 0.0f;
+      buffer[j++] = 0.0f;
+    }
+  }
+}
+
 static void app_init(void) {
   sg_setup(&(sg_desc){.context = sapp_sgcontext()});
   sgl_setup(&(sgl_desc_t){0});
   videopool_init();
-  saudio_setup(&(saudio_desc){.num_channels = 2, .buffer_frames = 2048 * 16, .packet_frames = 128 * 16});
+  saudio_setup(&(saudio_desc){.num_channels = 2, .stream_cb = app_audio_callback});
 
   MovieMaker* m = &state;
+
+  thread_mutex_init(&m->aud_thread_mtx);
+
   const int atlas_dim = round_pow2(512.0f * sapp_dpi_scale());
   m->font_ctx = sfons_create(atlas_dim, atlas_dim, FONS_ZERO_TOPLEFT);
   m->font_sans = fonsAddFontMem(m->font_ctx, "sans", Vera_ttf, Vera_ttf_len, false);
@@ -945,12 +966,16 @@ static void app_videopanel(MovieMaker* m, Rect videopanel) {
     }
     if (top) {
       double clippos = ui_clampd(m->trackpos - top->pos + top->clipstart, 0.0, video_total_secs(top->vid));
-      video_nextframe(top->vid, clippos);
+      video_nextframe(top->vid, clippos, &m->aud_thread_mtx);
       app_drawvideo(m, top->vid, videopanel);
+      m->curaud_video = top->vid;
     } else if (bottom) {
       double clippos = ui_clampd(m->trackpos - bottom->pos + bottom->clipstart, 0.0, video_total_secs(bottom->vid));
-      video_nextframe(bottom->vid, clippos);
+      video_nextframe(bottom->vid, clippos, &m->aud_thread_mtx);
       app_drawvideo(m, bottom->vid, videopanel);
+      m->curaud_video = bottom->vid;
+    } else {
+      m->curaud_video = (VideoId){0};
     }
   }
 }
