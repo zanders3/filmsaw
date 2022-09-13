@@ -19,7 +19,6 @@ void videoclips_free(VideoClips* l) {
   for (int i = 0; i < l->num; i++) {
     VideoClip* clip = &l->clips[i];
     sg_destroy_image(clip->thumbnail);
-    video_close(clip->vid);
   }
   free(l->clips);
   *l = (VideoClips){0};

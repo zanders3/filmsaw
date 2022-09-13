@@ -67,8 +67,7 @@ typedef struct {
   AVFormatContext* aud_fmt_ctx;
   AVCodecParameters* aud_codec_params;
   AVCodecContext* aud_codec_ctx;
-  int aud_num_channels, aud_sample_rate;
-  int audiostreamidx, audbuflinesize;
+  int audiostreamidx;
 
   PacketQueue vid_queue;
 
@@ -81,6 +80,7 @@ typedef struct {
   char filepath[_MAX_PATH + 1];
 
   double pos_secs, next_swap_secs, total_secs;
+  bool gc_marked;
 } Video;
 
 typedef struct {
@@ -295,7 +295,10 @@ void video_nextframe(VideoId vid, double pos_secs, thread_mutex_t* aud_thread_mt
   // apply seeking if required
   if (dt < 0.0 || dt > 0.01) {
     packet_queue_clear(&v->vid_queue);
+
+    thread_mutex_lock(aud_thread_mtx);
     packet_queue_clear(&v->aud_queue);
+    thread_mutex_unlock(aud_thread_mtx);
 
     int64_t timestamp = (int64_t)((double)v->pos_secs * time_base);
     av_seek_frame(v->fmt_ctx, v->vidstreamidx, timestamp, AVSEEK_FLAG_BACKWARD);
@@ -353,29 +356,36 @@ void video_nextframe(VideoId vid, double pos_secs, thread_mutex_t* aud_thread_mt
   }
 }
 
-static int video_appendaudio(AVFrame* aud_frame, float* frames, int* frame_pos, int* num_frames) {
+static int video_appendaudio(AVFrame* aud_frame, float* frames, int* frame_pos, int* num_frames, int num_channels) {
   int num_samples = aud_frame->nb_samples - *frame_pos;
   const float* framesl = (float*)aud_frame->data[0];
   const float* framesr = aud_frame->channels >= 2 ? (float*)aud_frame->data[1] : framesl;
   if (num_samples > *num_frames) {
     num_samples = *num_frames;
   }
-  for (int i = 0, j = *frame_pos * 2; i < num_samples; i++) {
-    frames[j++] = framesl[i];
-    frames[j++] = framesr[i];
+  if (num_channels >= 2) {
+    for (int i = 0, j = *frame_pos * num_channels; i < num_samples; i++) {
+      frames[j++] = framesl[i];
+      frames[j++] = framesr[i];
+    }
+  } else {
+    for (int i = 0, j = *frame_pos; i < num_samples; i++) {
+      frames[j++] = framesl[i];
+    }
   }
   *frame_pos += num_samples;
   *num_frames -= num_samples;
   return num_samples;
 }
 
-void video_getaudio_underlock(VideoId vid, float* frames, int num_frames) {
+void video_getaudio_underlock(VideoId vid, float* frames, int num_frames, int num_channels, int sample_rate) {
   Video* v = _video_at(vid);
   if (v->aud_playing && v->aud_codec_ctx) {
     AVPacket* pkt = NULL;
     while (num_frames > 0) {
       if (v->aud_got_frame) {
-        frames += video_appendaudio(v->aud_frame_raw, frames, &v->aud_frame_pos, &num_frames) * 2;
+        assert(v->aud_frame_raw->sample_rate == sample_rate);
+        frames += video_appendaudio(v->aud_frame_raw, frames, &v->aud_frame_pos, &num_frames, num_channels) * 2;
         if (v->aud_frame_pos < v->aud_frame_raw->nb_samples) {
           break;
         }
@@ -397,9 +407,15 @@ void video_getaudio_underlock(VideoId vid, float* frames, int num_frames) {
       av_packet_unref(pkt);
     }
   }
-  for (int i = 0, j = 0; i < num_frames; i++) {
-    frames[j++] = 0.0f;
-    frames[j++] = 0.0f;
+  if (num_channels >= 2) {
+    for (int i = 0, j = 0; i < num_frames; i++) {
+      frames[j++] = 0.0f;
+      frames[j++] = 0.0f;
+    }
+  } else {
+    for (int i = 0; i < num_frames; i++) {
+      frames[i] = 0.0f;
+    }
   }
 }
 
@@ -423,6 +439,17 @@ void video_close(VideoId vid) {
   if (v->fmt_ctx) {
     avformat_close_input(&v->fmt_ctx);
   }
+  if (v->codec_ctx) {
+    avcodec_close(v->codec_ctx);
+    avcodec_free_context(&v->codec_ctx);
+  }
+  if (v->aud_fmt_ctx) {
+    avformat_close_input(&v->aud_fmt_ctx);
+  }
+  if (v->aud_codec_ctx) {
+    avcodec_close(v->aud_codec_ctx);
+    avcodec_free_context(&v->aud_codec_ctx);
+  }
   sg_destroy_image(v->img);
   if (v->imgbuf) {
     av_free(v->imgbuf);
@@ -430,6 +457,25 @@ void video_close(VideoId vid) {
   packet_queue_clear(&v->aud_queue);
   packet_queue_clear(&v->vid_queue);
   _video_free(vid);
+}
+
+void video_gc_clearmarks(void) {
+  VideoPool* p = &_videos;
+  for (int i = 0; i < p->size; i++) {
+    p->videos[i].gc_marked = false;
+  }
+}
+void video_gc_mark(VideoId vid) {
+  Video* v = _video_at(vid);
+  v->gc_marked = true;
+}
+void video_gc_sweep(void) {
+  VideoPool* p = &_videos;
+  for (int i = 0; i < p->size; i++) {
+    if (p->videos[i].id && !p->videos[i].gc_marked) {
+      video_close((VideoId){.id = p->videos[i].id});
+    }
+  }
 }
 
 double video_total_secs(VideoId vid) {
@@ -465,6 +511,7 @@ struct sg_image video_make_thumbnail(VideoId vid, double pos_secs, int* width, i
   AVPacket packet;
   while (av_read_frame(v->fmt_ctx, &packet) >= 0) {
     if (avcodec_send_packet(v->codec_ctx, &packet) < 0) {
+      av_packet_unref(&packet);
       continue;
     }
     if (avcodec_receive_frame(v->codec_ctx, v->frame_raw) >= 0) {
@@ -497,8 +544,10 @@ struct sg_image video_make_thumbnail(VideoId vid, double pos_secs, int* width, i
       av_free(imgbuf);
       sws_freeContext(sws_ctx);
       av_frame_free(&frame_rgb);
+      av_packet_unref(&packet);
       return img;
     }
+    av_packet_unref(&packet);
   }
   return (sg_image){0};
 }

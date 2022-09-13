@@ -13,7 +13,6 @@ void videopool_init();
 typedef union thread_mutex_t thread_mutex_t;
 
 typedef struct VideoOpenParams {
-  int aud_num_channels, aud_sample_rate;
   bool disable_audio;
 } VideoOpenParams;
 typedef struct {
@@ -21,9 +20,14 @@ typedef struct {
   const char* err;
 } VideoOpenRes;
 VideoOpenRes video_open(const char* path, const VideoOpenParams* p);
-void video_nextframe(VideoId vid, double pos_secs, thread_mutex_t* aud_thread_mtx); // locks aud_thread_mtx
-void video_getaudio_underlock(VideoId vid, float* frames, int num_frames);          // assumes aud_thread_mtx is locked
 void video_close(VideoId vid);
+
+void video_gc_clearmarks(void);
+void video_gc_mark(VideoId vid);
+void video_gc_sweep(void);
+
+void video_nextframe(VideoId vid, double pos_secs, thread_mutex_t* aud_thread_mtx); // locks aud_thread_mtx
+void video_getaudio_underlock(VideoId vid, float* frames, int num_frames, int num_channels, int sample_rate);          // assumes aud_thread_mtx is locked
 double video_total_secs(VideoId vid);
 double video_pos_secs(VideoId vid);
 int video_width(VideoId vid);

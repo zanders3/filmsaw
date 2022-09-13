@@ -18,6 +18,8 @@
 #include <portable_file_dialogs.h>
 #include <thread/thread.h>
 
+static void app_gcvideos(void);
+
 enum IconType {
   IconType_Pause = 0,
   IconType_Play = 1,
@@ -53,6 +55,8 @@ void undobuffer_push(UndoBuffer* buffer, const VideoClips* clips) {
   *undostate = (VideoClips){.clips = (VideoClip*)malloc(clips->num * sizeof(VideoClip)), .num = clips->num};
   assert(undostate->clips);
   memcpy(undostate->clips, clips->clips, sizeof(VideoClip) * clips->num);
+
+  app_gcvideos();
 }
 void undobuffer_undo(UndoBuffer* buffer, VideoClips* clips) {
   if (buffer->pos == buffer->head) {
@@ -146,9 +150,7 @@ void videosources_opendir(VideoSources* s, const char* path) {
       }
       char fullpath[PATH_MAX];
       snprintf(fullpath, PATH_MAX, "%s/%s", path, ent->d_name);
-      VideoOpenRes res = video_open(fullpath, &(VideoOpenParams){.aud_num_channels = saudio_channels(),
-                                                                 .aud_sample_rate = saudio_sample_rate(),
-                                                                 .disable_audio = true});
+      VideoOpenRes res = video_open(fullpath, &(VideoOpenParams){.disable_audio = true});
       if (res.err) {
         DebugLog("failed to open %s: %s", fullpath, res.err);
         continue;
@@ -201,6 +203,7 @@ typedef struct MovieMaker {
   bool trackdragstarted;
 
   VideoSources sources;
+  int switch_source_idx;
   float sourcescroll;
   const VideoSource *dragvideo, *placevideo;
   Rect dragvideopos;
@@ -230,16 +233,36 @@ int fonsAddFontMem(FONScontext* stash, const char* name, unsigned char* data, in
 
 static void app_audio_callback(float* buffer, int num_frames, int num_channels) {
   MovieMaker* m = &state;
+  thread_mutex_lock(&m->aud_thread_mtx);
   if (m->curaud_video.id) {
-    thread_mutex_lock(&m->aud_thread_mtx);
-    video_getaudio_underlock(m->curaud_video, buffer, num_frames);
-    thread_mutex_unlock(&m->aud_thread_mtx);
+    video_getaudio_underlock(m->curaud_video, buffer, num_frames, num_channels, saudio_sample_rate());
   } else {
     for (int i = 0, j = 0; i < num_frames; i++) {
       buffer[j++] = 0.0f;
       buffer[j++] = 0.0f;
     }
   }
+  thread_mutex_unlock(&m->aud_thread_mtx);
+}
+
+static void app_gcvideos(void) {
+  MovieMaker* m = &state;
+  thread_mutex_lock(&m->aud_thread_mtx);
+
+  m->curaud_video = (VideoId){0};
+  video_gc_clearmarks();
+  for (int i = 0; i < m->clips.num; i++) {
+    video_gc_mark(m->clips.clips[i].vid);
+  }
+  for (int i = 0; i < MAX_UNDO_BUFFER; i++) {
+    VideoClips* clips = &m->undo.states[i];
+    for (int j = 0; j < clips->num; j++) {
+      video_gc_mark(clips->clips[j].vid);
+    }
+  }
+  video_gc_sweep();
+
+  thread_mutex_unlock(&m->aud_thread_mtx);
 }
 
 static void app_init(void) {
@@ -283,6 +306,7 @@ static void app_init(void) {
   char cwd[PATH_MAX];
   GetCurrentDirectoryA(PATH_MAX, cwd);
   videosources_opendir(&m->sources, cwd);
+  m->switch_source_idx = -1;
 }
 
 static void app_sliceclip(MovieMaker* m) {
@@ -333,11 +357,11 @@ static void app_openproject(MovieMaker* m) {
   if (pfd_open_dialog("Open Project", &filters, 1, pathbuf, PATH_MAX)) {
     undobuffer_clear(&m->undo);
     videoclips_free(&m->clips);
+    app_gcvideos();
     m->trackpos = 0.0;
     m->trackzoom = 800.0f / 32.0f;
     m->trackoffset = 16.0f * 0.5f;
-    videoclips_load(pathbuf, &m->clips,
-                    &(VideoOpenParams){.aud_num_channels = saudio_channels(), .aud_sample_rate = saudio_sample_rate()});
+    videoclips_load(pathbuf, &m->clips, &(VideoOpenParams){0});
   }
 }
 
@@ -350,6 +374,7 @@ static void app_saveproject(MovieMaker* m) {
 }
 
 static void app_exportproject(MovieMaker* m) {
+  (void)m;
   // TODO LOL
 }
 
@@ -357,6 +382,7 @@ static void app_newproject(MovieMaker* m) {
   (void)m;
   undobuffer_clear(&m->undo);
   videoclips_free(&m->clips);
+  app_gcvideos();
   m->trackpos = 0.0;
   m->trackzoom = 800.0f / 32.0f;
   m->trackoffset = 16.0f * 0.5f;
@@ -796,8 +822,7 @@ static void app_trackspanel(MovieMaker* m, Rect trackspanel) {
         if (m->placevideo) {
           char fullpath[PATH_MAX];
           snprintf(fullpath, PATH_MAX, "%s/%s", m->sources.filepath, m->placevideo->filename);
-          VideoOpenRes res = video_open(fullpath, &(VideoOpenParams){.aud_num_channels = saudio_channels(),
-                                                                     .aud_sample_rate = saudio_sample_rate()});
+          VideoOpenRes res = video_open(fullpath, &(VideoOpenParams){0});
           if (res.err) {
             DebugLog("failed to open video %s: %s\n", fullpath, res.err);
           } else {
@@ -968,19 +993,35 @@ static void app_videopanel(MovieMaker* m, Rect videopanel) {
       double clippos = ui_clampd(m->trackpos - top->pos + top->clipstart, 0.0, video_total_secs(top->vid));
       video_nextframe(top->vid, clippos, &m->aud_thread_mtx);
       app_drawvideo(m, top->vid, videopanel);
-      m->curaud_video = top->vid;
     } else if (bottom) {
       double clippos = ui_clampd(m->trackpos - bottom->pos + bottom->clipstart, 0.0, video_total_secs(bottom->vid));
       video_nextframe(bottom->vid, clippos, &m->aud_thread_mtx);
       app_drawvideo(m, bottom->vid, videopanel);
+    }
+    thread_mutex_lock(&m->aud_thread_mtx);
+    if (top) {
+      m->curaud_video = top->vid;
+    } else if (bottom) {
       m->curaud_video = bottom->vid;
     } else {
       m->curaud_video = (VideoId){0};
     }
+    thread_mutex_unlock(&m->aud_thread_mtx);
   }
 }
 
 static void app_sourcepanel(MovieMaker* m, Rect sourcepanel) {
+  if (m->switch_source_idx != -1) {
+    char newfilepath[MAX_PATH];
+#ifdef _WIN32
+    snprintf(newfilepath, MAX_PATH, "%s\\%s", m->sources.filepath, m->sources.sources[m->switch_source_idx].filename);
+#else
+    snprintf(newfilepath, MAX_PATH, "%s/%s", m->sources.filepath, source->filename);
+#endif
+    videosources_opendir(&m->sources, newfilepath);
+    m->switch_source_idx = -1;
+  }
+
   ui_draw_box(m->ui, sourcepanel, &(BoxStyle){.bg_color = panel_col});
   sourcepanel = rect_contract(sourcepanel, 5.0f);
   Rect topbar = rect_cut_top(&sourcepanel, 36.0f);
@@ -1055,15 +1096,9 @@ static void app_sourcepanel(MovieMaker* m, Rect sourcepanel) {
     }
     if (evt & UIEvent_MouseClick && source->is_dir) {
       m->sourcescroll = 0.0f;
-      char newfilepath[MAX_PATH];
-#ifdef _WIN32
-      snprintf(newfilepath, MAX_PATH, "%s\\%s", m->sources.filepath, source->filename);
-#else
-      snprintf(newfilepath, MAX_PATH, "%s/%s", m->sources.filepath, source->filename);
-#endif
-      videosources_opendir(&m->sources, newfilepath);
+      m->switch_source_idx = i;
     }
-    if (evt & UIEvent_MouseDrag) {
+    if (evt & UIEvent_MouseDrag && !source->is_dir) {
       m->dragvideo = source;
       m->placevideo = NULL;
       Mouse mouse = ui_mouse(m->ui, (Rect){0});
